@@ -391,20 +391,30 @@ function addOrUpdateContact(){
     return;
   }
   if (S.editingId){
-    db.from("contacts").update({ nome, telefone, tier }).eq("id", S.editingId)
-      .then(({ error }) => { if (error){ console.error(error); showToast("Erro ao salvar — verifique sua internet"); } });
+    const editingId = S.editingId;
+    db.from("contacts").update({ nome, telefone, tier }).eq("id", editingId).select().single()
+      .then(({ data, error }) => {
+        if (error){ console.error(error); showToast("Erro ao salvar — verifique sua internet"); return; }
+        const idx = S.contacts.findIndex(c => c.id === editingId);
+        if (idx !== -1 && data) S.contacts[idx] = data;
+        renderChips(); renderList();
+      });
     S.editingId = null;
     document.getElementById("formTitle").innerHTML = icon("plus",15,"#B8963E") + " Adicionar revendedora";
     document.getElementById("submitBtn").textContent = "Adicionar";
     document.getElementById("cancelEditBtn").style.display = "none";
   } else {
-    db.from("contacts").insert({ nome, telefone, tier })
-      .then(({ error }) => { if (error){ console.error(error); showToast("Erro ao salvar — verifique sua internet"); } });
+    db.from("contacts").insert({ nome, telefone, tier }).select().single()
+      .then(({ data, error }) => {
+        if (error){ console.error(error); showToast("Erro ao salvar — verifique sua internet"); return; }
+        if (data && !S.contacts.some(c => c.id === data.id)){
+          S.contacts.push(data);
+          renderChips(); renderList();
+        }
+      });
   }
   document.getElementById("inputNome").value = "";
   document.getElementById("inputTelefone").value = "";
-
-  renderModals(); renderChips(); renderList();
 }
 function startEdit(id){
   const c = S.contacts.find(x => x.id === id);
@@ -429,8 +439,11 @@ function cancelEdit(){
 function deleteContact(id){
   if (S.editingId === id) cancelEdit();
   db.from("contacts").delete().eq("id", id)
-    .then(({ error }) => { if (error){ console.error(error); showToast("Erro ao excluir — verifique sua internet"); } });
-  renderModals(); renderChips(); renderList();
+    .then(({ error }) => {
+      if (error){ console.error(error); showToast("Erro ao excluir — verifique sua internet"); return; }
+      S.contacts = S.contacts.filter(c => c.id !== id);
+      renderChips(); renderList();
+    });
 }
 
 /* ======================= SEND ======================= */
@@ -586,7 +599,6 @@ function renderList(){
     '</div>';
   });
   document.getElementById("listArea").innerHTML = html;
-  console.log(html)
 }
 
 function renderModals(){
