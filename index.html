@@ -200,14 +200,16 @@ let templatesChannel = null;
 let S = {
   contacts: [],
   templates: JSON.parse(JSON.stringify(DEFAULT_TEMPLATES)),
+  waTemplates: {},   // { tier_key: "nome_do_template_aprovado_no_meta" }
   attachments: {},   // session-only: { key: {name,size,type,url} }
   activeTier: "todos",
   search: "",
   editingId: null,
   editTemplateTier: null,
   draftTemplate: "",
-  bulk: null,        // { queue, index, mode, label }
+  bulk: null,        // { queue, index, mode, label } — fila manual (wa.me)
   bulkSentIds: [],
+  autoBulk: null,    // { queue, index, mode, label, successIds, failedIds, running, stopped } — envio automático (API oficial)
 };
 
 /* ======================= ICONS (inline SVG, feather-style) ======================= */
@@ -306,9 +308,14 @@ async function initSupabase(){
       const rows = Object.keys(DEFAULT_TEMPLATES).map(key => ({ tier_key: key, message: DEFAULT_TEMPLATES[key] }));
       await db.from("templates").insert(rows);
       S.templates = JSON.parse(JSON.stringify(DEFAULT_TEMPLATES));
+      S.waTemplates = {};
     } else {
       S.templates = Object.assign({}, DEFAULT_TEMPLATES);
-      templatesData.forEach(row => { S.templates[row.tier_key] = row.message; });
+      S.waTemplates = {};
+      templatesData.forEach(row => {
+        S.templates[row.tier_key] = row.message;
+        if (row.whatsapp_template_name) S.waTemplates[row.tier_key] = row.whatsapp_template_name;
+      });
     }
 
     // Contatos em tempo real — qualquer computador que adicionar/editar/excluir
@@ -326,8 +333,13 @@ async function initSupabase(){
         const { data, error } = await db.from("templates").select("*");
         if (!error){
           const merged = Object.assign({}, DEFAULT_TEMPLATES);
-          (data || []).forEach(row => { merged[row.tier_key] = row.message; });
+          const waMerged = {};
+          (data || []).forEach(row => {
+            merged[row.tier_key] = row.message;
+            if (row.whatsapp_template_name) waMerged[row.tier_key] = row.whatsapp_template_name;
+          });
           S.templates = merged;
+          S.waTemplates = waMerged;
           renderChips(); renderList();
         }
       })
@@ -482,6 +494,101 @@ function bulkAdvance(){
 }
 function closeBulk(){ S.bulk = null; S.bulkSentIds = []; renderModals(); }
 
+/* ======================= ENVIO AUTOMÁTICO (API oficial do WhatsApp) ======================= */
+const AUTO_SEND_DELAY_MS = 1200; // intervalo entre mensagens, pra não estourar limites da API
+
+function startAutoBulk(tierKey, mode){
+  const list = mode === "general" ? S.contacts.slice() : S.contacts.filter(c => c.tier === tierKey);
+  if (list.length === 0){ showToast("Nenhuma revendedora nesse filtro"); return; }
+
+  const missingTemplate = mode === "general" ? !S.waTemplates.general : !S.waTemplates[tierKey];
+  if (missingTemplate){
+    showToast("Cadastre o nome do template aprovado no Meta para esse grupo antes de enviar automaticamente");
+    return;
+  }
+
+  S.autoBulk = {
+    queue: list,
+    index: 0,
+    mode,
+    tierKey,
+    label: mode === "general" ? "📢 Mensagem Geral" : (tierOf(tierKey).emoji+" "+tierOf(tierKey).label),
+    successIds: [],
+    failedIds: [],
+    running: true,
+    stopped: false,
+  };
+  renderModals();
+  runAutoBulkStep();
+}
+
+async function runAutoBulkStep(){
+  const ab = S.autoBulk;
+  if (!ab || ab.stopped) return;
+
+  if (ab.index >= ab.queue.length){
+    ab.running = false;
+    renderModals();
+    return;
+  }
+
+  const c = ab.queue[ab.index];
+  const templateName = ab.mode === "general" ? S.waTemplates.general : S.waTemplates[c.tier];
+
+  try{
+    const { data, error } = await db.functions.invoke("send-whatsapp-message", {
+      body: { to: toWaNumber(c.telefone), templateName, nome: c.nome.split(" ")[0] }
+    });
+    if (error || !data || data.ok === false){
+      console.error("Falha ao enviar para", c.nome, error || data);
+      ab.failedIds.push(c.id);
+    } else {
+      ab.successIds.push(c.id);
+    }
+  }catch(err){
+    console.error("Falha ao enviar para", c.nome, err);
+    ab.failedIds.push(c.id);
+  }
+
+  ab.index += 1;
+  renderModals();
+
+  if (ab.stopped) return;
+  setTimeout(runAutoBulkStep, AUTO_SEND_DELAY_MS);
+}
+
+function stopAutoBulk(){
+  if (!S.autoBulk) return;
+  S.autoBulk.stopped = true;
+  S.autoBulk.running = false;
+  renderModals();
+}
+
+function closeAutoBulk(){ S.autoBulk = null; renderModals(); }
+
+async function testWhatsAppAPI(){
+  const numero = window.prompt("Digite o número (com DDI+DDD, só números) para receber a mensagem de teste 'hello_world':\nEx: 5511999998888");
+  if (!numero) return;
+  const to = numero.replace(/\D/g, "");
+  if (to.length < 10){ showToast("Número inválido"); return; }
+
+  showToast("Enviando mensagem de teste...");
+  try{
+    const { data, error } = await db.functions.invoke("send-whatsapp-message", {
+      body: { to, templateName: "hello_world", language: "en_US" }
+    });
+    if (error || !data || data.ok === false){
+      console.error("Falha no teste:", error || data);
+      showToast("Falha no teste — veja o console (F12) para detalhes");
+    } else {
+      showToast("Mensagem de teste enviada! Confira o WhatsApp do número informado.");
+    }
+  }catch(err){
+    console.error("Falha no teste:", err);
+    showToast("Erro ao chamar a função — veja o console (F12)");
+  }
+}
+
 /* ======================= TEMPLATES ======================= */
 function openTemplateEditor(key){
   S.editTemplateTier = key;
@@ -565,11 +672,14 @@ function renderChips(){
   let actions = "";
   if (S.activeTier !== "todos"){
     const t = tierOf(S.activeTier);
-    actions += '<button class="btn" style="background:'+t.color+';color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startBulk(\''+t.key+'\',\'tier\')">'+icon("send",13)+' Enviar para todas de '+t.label+' ('+(cnt[t.key]||0)+')</button>';
+    actions += '<button class="btn" style="background:'+t.color+';color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startBulk(\''+t.key+'\',\'tier\')">'+icon("send",13)+' Enviar manualmente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
+    actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(\''+t.key+'\',\'tier\')" title="Requer template aprovado no Meta">'+icon("send",13)+' Enviar automaticamente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
     actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\''+t.key+'\')">'+icon("message",14,"#B8963E")+' Editar mensagem de '+t.label+'</button>';
   }
-  actions += '<button class="btn btn-primary" style="font-size:12.5px;padding:8px 12px" onclick="startBulk(null,\'general\')">'+icon("megaphone",13)+' Enviar mensagem geral para todas ('+S.contacts.length+')'+(S.attachments.general?icon("paperclip",12):"")+'</button>';
+  actions += '<button class="btn btn-primary" style="font-size:12.5px;padding:8px 12px" onclick="startBulk(null,\'general\')">'+icon("megaphone",13)+' Enviar manualmente mensagem geral ('+S.contacts.length+')'+(S.attachments.general?icon("paperclip",12):"")+'</button>';
+  actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(null,\'general\')" title="Requer template aprovado no Meta">'+icon("megaphone",13)+' Enviar automaticamente mensagem geral ('+S.contacts.length+')</button>';
   actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\'general\')">'+icon("message",14,"#B8963E")+' Editar mensagem geral</button>';
+  actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px;background:#EFEAE0" onclick="testWhatsAppAPI()" title="Envia o template hello_world (não precisa de aprovação) — use pra validar a conexão com a Meta">'+icon("check",14,"#1F7A4D")+' 🧪 Testar API do WhatsApp</button>';
   document.getElementById("actionsArea").innerHTML = actions;
 }
 
@@ -662,6 +772,46 @@ function renderModals(){
         '<div style="font-size:15px;font-weight:700">Fila concluída</div>'+
         '<div style="font-size:13px;color:var(--dim);margin-top:4px">'+S.bulkSentIds.length+' de '+S.bulk.queue.length+' mensagens abertas no WhatsApp</div>'+
         '<button class="btn btn-primary" style="margin-top:16px;display:inline-flex" onclick="closeBulk()">Fechar</button>'+
+      '</div>';
+    }
+    html += '</div></div>';
+  }
+
+  // Auto bulk send modal (API oficial)
+  if (S.autoBulk){
+    const ab = S.autoBulk;
+    const finished = ab.index >= ab.queue.length;
+    const current = !finished ? ab.queue[ab.index] : null;
+    const currentTier = current ? tierOf(current.tier) : null;
+    html += '<div class="modal-overlay"><div class="modal">'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
+        '<div style="font-size:14px;font-weight:700">Envio automático — '+ab.label+'</div>'+
+        '<button class="modal-close" onclick="'+(finished?"closeAutoBulk()":"stopAutoBulk()")+'">'+icon("x",18)+'</button>'+
+      '</div>'+
+      '<div style="font-size:11.5px;color:var(--dim2);margin-bottom:10px">'+ab.index+' de '+ab.queue.length+' · '+
+        '<span style="color:#1F7A4D">'+ab.successIds.length+' enviadas</span>'+
+        (ab.failedIds.length ? ' · <span style="color:#B84E4E">'+ab.failedIds.length+' falharam</span>' : '')+
+      '</div>'+
+      '<div class="progress-track"><div class="progress-fill" style="width:'+((ab.index/ab.queue.length)*100)+'%;background:#1F7A4D"></div></div>';
+
+    if (!finished){
+      html += '<div style="border:1px solid var(--line);border-left:4px solid '+currentTier.color+';border-radius:8px;padding:12px;margin-bottom:12px">'+
+        '<div style="font-size:11px;color:var(--dim2);margin-bottom:4px">Enviando agora para:</div>'+
+        '<div style="font-size:15px;font-weight:700">'+esc(current.nome)+'</div>'+
+        '<div class="contact-meta">'+icon("phone",11)+' '+formatPhoneDisplay(current.telefone)+
+          '<span class="tier-badge" style="background:'+currentTier.light+';color:'+currentTier.color+'">'+currentTier.emoji+' '+currentTier.label+'</span></div>'+
+      '</div>'+
+      '<div class="row-gap">'+
+        '<button class="btn btn-light" style="flex:1" onclick="stopAutoBulk()">'+icon("x",15)+' Parar envio</button>'+
+      '</div>'+
+      '<div class="bottom-note">'+icon("alert",13)+' O envio continua sozinho, uma mensagem a cada '+(AUTO_SEND_DELAY_MS/1000)+'s, usando os templates aprovados no WhatsApp Business. Você pode fechar esta janela e voltar depois — mas não feche a página do navegador.</div>';
+    } else {
+      html += '<div style="text-align:center;padding:12px 0">'+
+        '<div style="font-size:30px;margin-bottom:8px">'+(ab.stopped ? "⏸️" : "✅")+'</div>'+
+        '<div style="font-size:15px;font-weight:700">'+(ab.stopped ? "Envio interrompido" : "Envio concluído")+'</div>'+
+        '<div style="font-size:13px;color:var(--dim);margin-top:4px">'+ab.successIds.length+' de '+ab.queue.length+' mensagens enviadas com sucesso'+(ab.failedIds.length?(' · '+ab.failedIds.length+' falharam'):'')+'</div>'+
+        (ab.failedIds.length ? '<div style="font-size:11.5px;color:#B84E4E;margin-top:6px">Verifique o console do navegador para detalhes das falhas (número inválido, template não aprovado, etc).</div>' : '')+
+        '<button class="btn btn-primary" style="margin-top:16px;display:inline-flex" onclick="closeAutoBulk()">Fechar</button>'+
       '</div>';
     }
     html += '</div></div>';
