@@ -268,6 +268,14 @@ function resolveMessage(c, mode){
 }
 function waUrl(c, mode){ return "https://wa.me/"+toWaNumber(c.telefone)+"?text="+encodeURIComponent(resolveMessage(c, mode)); }
 function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function fileToBase64(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 function showToast(msg){
   document.getElementById("toastArea").innerHTML = '<div class="toast">'+esc(msg)+'</div>';
@@ -529,10 +537,17 @@ async function runAutoBulkStep(){
 
   const c = ab.queue[ab.index];
   const message = resolveMessage(c, ab.mode);
+  const attKey = ab.mode === "general" ? "general" : c.tier;
+  const att = S.attachments[attKey];
 
   try{
+    let media = null;
+    if (att && att.file){
+      const base64 = await fileToBase64(att.file);
+      media = { base64, filename: att.name, mimetype: att.type };
+    }
     const { data, error } = await db.functions.invoke("send-crm-message", {
-      body: { to: toWaNumber(c.telefone), message, channel: S.crmChannel }
+      body: { to: toWaNumber(c.telefone), message, media, channel: S.crmChannel }
     });
     if (error || !data || data.ok === false){
       console.error("Falha ao enviar para", c.nome, error || data);
@@ -608,7 +623,7 @@ function onAttachmentPicked(key, inputEl){
   if (file.size > MAX_ATTACHMENT_MB*1024*1024){ showToast("Arquivo muito grande (máx. "+MAX_ATTACHMENT_MB+"MB)"); return; }
   if (S.attachments[key] && S.attachments[key].url) URL.revokeObjectURL(S.attachments[key].url);
   const url = URL.createObjectURL(file);
-  S.attachments[key] = { name: file.name, size: file.size, type: file.type, url };
+  S.attachments[key] = { name: file.name, size: file.size, type: file.type, url, file };
   renderModals(); renderChips(); renderList();
 }
 function removeAttachment(key){
@@ -670,6 +685,7 @@ function renderChips(){
     '<select onchange="S.crmChannel=this.value" style="border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12.5px;background:#fff">'+
       '<option value="juridico"'+(S.crmChannel==="juridico"?" selected":"")+'>⚖️ Jurídico</option>'+
       '<option value="anuncio"'+(S.crmChannel==="anuncio"?" selected":"")+'>📣 Anúncio</option>'+
+      '<option value="uniformes"'+(S.crmChannel==="anuncio"?" selected":"")+'>👕 Uniformes</option>'+
     '</select>'+
   '</div>';
   if (S.activeTier !== "todos"){
@@ -678,7 +694,6 @@ function renderChips(){
     actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(\''+t.key+'\',\'tier\')" title="Envia direto pelo CRM, sem clique">'+icon("send",13)+' Enviar automaticamente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
     actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\''+t.key+'\')">'+icon("message",14,"#B8963E")+' Editar mensagem de '+t.label+'</button>';
   }
-  actions += '<button class="btn btn-primary" style="font-size:12.5px;padding:8px 12px" onclick="startBulk(null,\'general\')">'+icon("megaphone",13)+' Enviar manualmente mensagem geral ('+S.contacts.length+')'+(S.attachments.general?icon("paperclip",12):"")+'</button>';
   actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(null,\'general\')" title="Envia direto pelo CRM, sem clique">'+icon("megaphone",13)+' Enviar automaticamente mensagem geral ('+S.contacts.length+')</button>';
   actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\'general\')">'+icon("message",14,"#B8963E")+' Editar mensagem geral</button>';
   actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px;background:#EFEAE0" onclick="testWhatsAppAPI()" title="Manda uma mensagem de teste pelo CRM — use pra validar a conexão">'+icon("check",14,"#1F7A4D")+' 🧪 Testar envio automático</button>';
