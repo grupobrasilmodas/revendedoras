@@ -209,7 +209,8 @@ let S = {
   draftTemplate: "",
   bulk: null,        // { queue, index, mode, label } — fila manual (wa.me)
   bulkSentIds: [],
-  autoBulk: null,    // { queue, index, mode, label, successIds, failedIds, running, stopped } — envio automático (API oficial)
+  autoBulk: null,    // { queue, index, mode, label, successIds, failedIds, running, stopped } — envio automático via CRM
+  crmChannel: "juridico", // "juridico" | "anuncio" — qual token/número usar no envio
 };
 
 /* ======================= ICONS (inline SVG, feather-style) ======================= */
@@ -501,12 +502,6 @@ function startAutoBulk(tierKey, mode){
   const list = mode === "general" ? S.contacts.slice() : S.contacts.filter(c => c.tier === tierKey);
   if (list.length === 0){ showToast("Nenhuma revendedora nesse filtro"); return; }
 
-  const missingTemplate = mode === "general" ? !S.waTemplates.general : !S.waTemplates[tierKey];
-  if (missingTemplate){
-    showToast("Cadastre o nome do template aprovado no Meta para esse grupo antes de enviar automaticamente");
-    return;
-  }
-
   S.autoBulk = {
     queue: list,
     index: 0,
@@ -533,11 +528,11 @@ async function runAutoBulkStep(){
   }
 
   const c = ab.queue[ab.index];
-  const templateName = ab.mode === "general" ? S.waTemplates.general : S.waTemplates[c.tier];
+  const message = resolveMessage(c, ab.mode);
 
   try{
-    const { data, error } = await db.functions.invoke("send-whatsapp-message", {
-      body: { to: toWaNumber(c.telefone), templateName, nome: c.nome.split(" ")[0] }
+    const { data, error } = await db.functions.invoke("send-crm-message", {
+      body: { to: toWaNumber(c.telefone), message, channel: S.crmChannel }
     });
     if (error || !data || data.ok === false){
       console.error("Falha ao enviar para", c.nome, error || data);
@@ -567,15 +562,15 @@ function stopAutoBulk(){
 function closeAutoBulk(){ S.autoBulk = null; renderModals(); }
 
 async function testWhatsAppAPI(){
-  const numero = window.prompt("Digite o número (com DDI+DDD, só números) para receber a mensagem de teste 'hello_world':\nEx: 5511999998888");
+  const numero = window.prompt("Digite o número (com DDI+DDD, só números) para receber a mensagem de teste:\nEx: 5511999998888");
   if (!numero) return;
   const to = numero.replace(/\D/g, "");
   if (to.length < 10){ showToast("Número inválido"); return; }
 
   showToast("Enviando mensagem de teste...");
   try{
-    const { data, error } = await db.functions.invoke("send-whatsapp-message", {
-      body: { to, templateName: "hello_world", language: "en_US" }
+    const { data, error } = await db.functions.invoke("send-crm-message", {
+      body: { to, message: "Teste de envio automático — Comunidade DRA. 18K ✅", channel: S.crmChannel }
     });
     if (error || !data || data.ok === false){
       console.error("Falha no teste:", error || data);
@@ -670,16 +665,23 @@ function renderChips(){
 
   // actions row
   let actions = "";
+  actions += '<div style="display:flex;align-items:center;gap:6px;background:#EFEAE0;padding:6px 10px;border-radius:8px;font-size:12.5px">'+
+    '<span style="color:var(--dim2)">📱 Enviar pelo número:</span>'+
+    '<select onchange="S.crmChannel=this.value" style="border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12.5px;background:#fff">'+
+      '<option value="juridico"'+(S.crmChannel==="juridico"?" selected":"")+'>⚖️ Jurídico</option>'+
+      '<option value="anuncio"'+(S.crmChannel==="anuncio"?" selected":"")+'>📣 Anúncio</option>'+
+    '</select>'+
+  '</div>';
   if (S.activeTier !== "todos"){
     const t = tierOf(S.activeTier);
     actions += '<button class="btn" style="background:'+t.color+';color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startBulk(\''+t.key+'\',\'tier\')">'+icon("send",13)+' Enviar manualmente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
-    actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(\''+t.key+'\',\'tier\')" title="Requer template aprovado no Meta">'+icon("send",13)+' Enviar automaticamente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
+    actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(\''+t.key+'\',\'tier\')" title="Envia direto pelo CRM, sem clique">'+icon("send",13)+' Enviar automaticamente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
     actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\''+t.key+'\')">'+icon("message",14,"#B8963E")+' Editar mensagem de '+t.label+'</button>';
   }
   actions += '<button class="btn btn-primary" style="font-size:12.5px;padding:8px 12px" onclick="startBulk(null,\'general\')">'+icon("megaphone",13)+' Enviar manualmente mensagem geral ('+S.contacts.length+')'+(S.attachments.general?icon("paperclip",12):"")+'</button>';
-  actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(null,\'general\')" title="Requer template aprovado no Meta">'+icon("megaphone",13)+' Enviar automaticamente mensagem geral ('+S.contacts.length+')</button>';
+  actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(null,\'general\')" title="Envia direto pelo CRM, sem clique">'+icon("megaphone",13)+' Enviar automaticamente mensagem geral ('+S.contacts.length+')</button>';
   actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\'general\')">'+icon("message",14,"#B8963E")+' Editar mensagem geral</button>';
-  actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px;background:#EFEAE0" onclick="testWhatsAppAPI()" title="Envia o template hello_world (não precisa de aprovação) — use pra validar a conexão com a Meta">'+icon("check",14,"#1F7A4D")+' 🧪 Testar API do WhatsApp</button>';
+  actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px;background:#EFEAE0" onclick="testWhatsAppAPI()" title="Manda uma mensagem de teste pelo CRM — use pra validar a conexão">'+icon("check",14,"#1F7A4D")+' 🧪 Testar envio automático</button>';
   document.getElementById("actionsArea").innerHTML = actions;
 }
 
@@ -785,7 +787,7 @@ function renderModals(){
     const currentTier = current ? tierOf(current.tier) : null;
     html += '<div class="modal-overlay"><div class="modal">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
-        '<div style="font-size:14px;font-weight:700">Envio automático — '+ab.label+'</div>'+
+        '<div style="font-size:14px;font-weight:700">Envio automático — '+ab.label+' <span style="font-weight:400;color:var(--dim2);font-size:12px">('+(S.crmChannel==="anuncio"?"📣 Anúncio":"⚖️ Jurídico")+')</span></div>'+
         '<button class="modal-close" onclick="'+(finished?"closeAutoBulk()":"stopAutoBulk()")+'">'+icon("x",18)+'</button>'+
       '</div>'+
       '<div style="font-size:11.5px;color:var(--dim2);margin-bottom:10px">'+ab.index+' de '+ab.queue.length+' · '+
@@ -804,7 +806,7 @@ function renderModals(){
       '<div class="row-gap">'+
         '<button class="btn btn-light" style="flex:1" onclick="stopAutoBulk()">'+icon("x",15)+' Parar envio</button>'+
       '</div>'+
-      '<div class="bottom-note">'+icon("alert",13)+' O envio continua sozinho, uma mensagem a cada '+(AUTO_SEND_DELAY_MS/1000)+'s, usando os templates aprovados no WhatsApp Business. Você pode fechar esta janela e voltar depois — mas não feche a página do navegador.</div>';
+      '<div class="bottom-note">'+icon("alert",13)+' O envio continua sozinho, uma mensagem a cada '+(AUTO_SEND_DELAY_MS/1000)+'s, usando a mensagem cadastrada para cada nível. Você pode fechar esta janela e voltar depois — mas não feche a página do navegador.</div>';
     } else {
       html += '<div style="text-align:center;padding:12px 0">'+
         '<div style="font-size:30px;margin-bottom:8px">'+(ab.stopped ? "⏸️" : "✅")+'</div>'+
