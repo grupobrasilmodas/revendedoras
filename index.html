@@ -115,7 +115,17 @@
       <div style="display:flex; flex-direction:column; gap:8px;">
         <input id="inputNome" class="input" placeholder="Nome da revendedora">
         <div class="row-gap">
-          <input id="inputTelefone" class="input" placeholder="Telefone com DDD (ex: 11 91234-5678)" style="flex:1">
+          <select id="inputDDI" class="input" style="width:120px" onchange="onDDIChange()">
+            <option value="55">🇧🇷 +55</option>
+            <option value="595">🇵🇾 +595</option>
+            <option value="54">🇦🇷 +54</option>
+            <option value="598">🇺🇾 +598</option>
+            <option value="1">🇺🇸/🇨🇦 +1</option>
+            <option value="351">🇵🇹 +351</option>
+            <option value="34">🇪🇸 +34</option>
+            <option value="outro">🌍 Outro (digite completo)</option>
+          </select>
+          <input id="inputTelefone" class="input" placeholder="DDD + número (ex: 11 91234-5678)" style="flex:1">
           <select id="inputTier" class="input" style="width:150px"></select>
         </div>
         <div class="row-gap">
@@ -243,12 +253,40 @@ function icon(name, size, color){
 
 /* ======================= HELPERS ======================= */
 function onlyDigits(s){ return (s||"").replace(/\D/g,""); }
-function toWaNumber(raw){ let d = onlyDigits(raw); if (d.length <= 11) d = "55"+d; return d; }
+function toWaNumber(raw){
+  const trimmed = (raw || "").trim();
+  // Se o número já foi digitado com "+", respeita exatamente o DDI informado
+  // (não tenta adivinhar nem prefixa com 55).
+  if (trimmed.startsWith("+")) return onlyDigits(trimmed);
+  let d = onlyDigits(trimmed);
+  // Compatibilidade com contatos antigos: só assume Brasil quando o número
+  // tem o tamanho típico de DDD+telefone brasileiro (10 ou 11 dígitos).
+  if (d.length === 10 || d.length === 11) d = "55"+d;
+  return d;
+}
 function formatPhoneDisplay(raw){
+  const trimmed = (raw || "").trim();
+  if (trimmed.startsWith("+")){
+    const d = onlyDigits(trimmed);
+    return "+"+d;
+  }
   const d = onlyDigits(raw);
   if (d.length === 11) return "("+d.slice(0,2)+") "+d.slice(2,7)+"-"+d.slice(7);
   if (d.length === 10) return "("+d.slice(0,2)+") "+d.slice(2,6)+"-"+d.slice(6);
+  if (d.length > 11) return "+"+d; // já inclui DDI (ex: contato internacional salvo sem "+")
   return raw;
+}
+function onDDIChange(){
+  const ddi = document.getElementById("inputDDI").value;
+  const tel = document.getElementById("inputTelefone");
+  if (ddi === "outro"){
+    tel.placeholder = "Digite o número completo com + e DDI (ex: +595 985 523065)";
+    if (!tel.value.trim().startsWith("+")) tel.value = "+";
+  } else {
+    tel.placeholder = "DDD + número (ex: 11 91234-5678)";
+    // Remove um "+" solto que possa ter sobrado da opção "Outro"
+    if (tel.value.trim() === "+") tel.value = "";
+  }
 }
 function fileKind(file){
   if (!file) return "file";
@@ -405,11 +443,25 @@ function importData(file){
 /* ======================= CONTACT CRUD ======================= */
 function addOrUpdateContact(){
   const nome = document.getElementById("inputNome").value.trim();
-  const telefone = document.getElementById("inputTelefone").value.trim();
+  const rawTelefone = document.getElementById("inputTelefone").value.trim();
+  const ddi = document.getElementById("inputDDI").value;
   const tier = document.getElementById("inputTier").value;
-  if (!nome || onlyDigits(telefone).length < 10){
-    showToast("Preencha nome e um telefone válido com DDD");
+
+  if (!nome || onlyDigits(rawTelefone).length < 8){
+    showToast("Preencha nome e um telefone válido");
     return;
+  }
+
+  let telefone;
+  if (ddi === "outro"){
+    // Usa exatamente o que foi digitado — preserva o formato ao editar contatos
+    // antigos, e respeita o "+DDI..." digitado manualmente para novos contatos.
+    telefone = rawTelefone;
+  } else if (ddi === "55"){
+    // Mantém o formato histórico (sem "+") pra não quebrar contatos já existentes.
+    telefone = onlyDigits(rawTelefone);
+  } else {
+    telefone = "+"+ddi+onlyDigits(rawTelefone);
   }
   if (S.editingId){
     const editingId = S.editingId;
@@ -435,14 +487,18 @@ function addOrUpdateContact(){
       });
   }
   document.getElementById("inputNome").value = "";
+  document.getElementById("inputDDI").value = "55";
   document.getElementById("inputTelefone").value = "";
+  document.getElementById("inputTelefone").placeholder = "DDD + número (ex: 11 91234-5678)";
 }
 function startEdit(id){
   const c = S.contacts.find(x => x.id === id);
   if (!c) return;
   S.editingId = id;
   document.getElementById("inputNome").value = c.nome;
+  document.getElementById("inputDDI").value = "outro"; // preserva o telefone salvo exatamente como está
   document.getElementById("inputTelefone").value = c.telefone;
+  document.getElementById("inputTelefone").placeholder = "Digite o número completo com + e DDI (ex: +595 985 523065)";
   document.getElementById("inputTier").value = c.tier;
   document.getElementById("formTitle").innerHTML = icon("pencil",15,"#B8963E") + " Editar revendedora";
   document.getElementById("submitBtn").textContent = "Salvar alterações";
@@ -452,7 +508,9 @@ function startEdit(id){
 function cancelEdit(){
   S.editingId = null;
   document.getElementById("inputNome").value = "";
+  document.getElementById("inputDDI").value = "55";
   document.getElementById("inputTelefone").value = "";
+  document.getElementById("inputTelefone").placeholder = "DDD + número (ex: 11 91234-5678)";
   document.getElementById("formTitle").innerHTML = icon("plus",15,"#B8963E") + " Adicionar revendedora";
   document.getElementById("submitBtn").textContent = "Adicionar";
   document.getElementById("cancelEditBtn").style.display = "none";
@@ -685,7 +743,7 @@ function renderChips(){
     '<select onchange="S.crmChannel=this.value" style="border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12.5px;background:#fff">'+
       '<option value="juridico"'+(S.crmChannel==="juridico"?" selected":"")+'>⚖️ Jurídico</option>'+
       '<option value="anuncio"'+(S.crmChannel==="anuncio"?" selected":"")+'>📣 Anúncio</option>'+
-      '<option value="uniformes"'+(S.crmChannel==="anuncio"?" selected":"")+'>👕 Uniformes</option>'+
+      '<option value="uniformes"'+(S.crmChannel==="uniformes"?" selected":"")+'>👕 Uniformes</option>'+
     '</select>'+
   '</div>';
   if (S.activeTier !== "todos"){
@@ -694,6 +752,7 @@ function renderChips(){
     actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(\''+t.key+'\',\'tier\')" title="Envia direto pelo CRM, sem clique">'+icon("send",13)+' Enviar automaticamente para '+t.label+' ('+(cnt[t.key]||0)+')</button>';
     actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\''+t.key+'\')">'+icon("message",14,"#B8963E")+' Editar mensagem de '+t.label+'</button>';
   }
+  actions += '<button class="btn btn-primary" style="font-size:12.5px;padding:8px 12px" onclick="startBulk(null,\'general\')">'+icon("megaphone",13)+' Enviar manualmente mensagem geral ('+S.contacts.length+')'+(S.attachments.general?icon("paperclip",12):"")+'</button>';
   actions += '<button class="btn" style="background:#1F7A4D;color:#fff;font-size:12.5px;padding:8px 12px;border-radius:8px" onclick="startAutoBulk(null,\'general\')" title="Envia direto pelo CRM, sem clique">'+icon("megaphone",13)+' Enviar automaticamente mensagem geral ('+S.contacts.length+')</button>';
   actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px" onclick="openTemplateEditor(\'general\')">'+icon("message",14,"#B8963E")+' Editar mensagem geral</button>';
   actions += '<button class="btn-small" style="display:flex;align-items:center;gap:6px;background:#EFEAE0" onclick="testWhatsAppAPI()" title="Manda uma mensagem de teste pelo CRM — use pra validar a conexão">'+icon("check",14,"#1F7A4D")+' 🧪 Testar envio automático</button>';
