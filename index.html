@@ -71,6 +71,8 @@
 
 <!-- Banco de dados em nuvem (Supabase) — sincroniza os contatos entre todos os computadores -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<!-- Leitura de planilhas Excel/CSV para importação em massa de contatos -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 
@@ -132,6 +134,10 @@
           <button class="btn btn-primary" style="flex:1" id="submitBtn" onclick="addOrUpdateContact()">Adicionar</button>
           <button class="btn btn-light" id="cancelEditBtn" style="display:none" onclick="cancelEdit()">✕</button>
         </div>
+        <button class="btn-small" style="display:flex;align-items:center;justify-content:center;gap:6px;width:100%" onclick="document.getElementById('excelFileInput').click()">
+          📊 Importar contatos de uma planilha Excel/CSV
+        </button>
+        <input type="file" id="excelFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="onExcelFileSelected(this)">
       </div>
     </div>
 
@@ -153,6 +159,7 @@
 <script>
 /* ======================= DATA ======================= */
 const TIERS = [
+  { key: "sem_tier", label: "Sem Tier", emoji: "❓", faixa: "não classificado", color: "#9B9B9B", light: "#F0F0F0" },
   { key: "semente", label: "Semente", emoji: "🌱", faixa: "0–39 pts", color: "#7A8B5E", light: "#EEF2E7" },
   { key: "bronze", label: "Bronze", emoji: "🥉", faixa: "40–54 pts", color: "#A9713F", light: "#F5EBE0" },
   { key: "prata", label: "Prata", emoji: "🥈", faixa: "55–69 pts", color: "#8C8C8C", light: "#F0F0F0" },
@@ -163,6 +170,7 @@ const TIERS = [
 const GENERAL_PSEUDO = { key: "general", label: "Mensagem Geral", emoji: "📢", color: "#B8963E", light: "#FBF3DE" };
 
 const DEFAULT_TEMPLATES = {
+  sem_tier: "Oi {nome}! Tudo bem? Vamos te ajudar a começar sua jornada na Comunidade DRA. 18K 💛 Em breve você vai receber mais informações sobre seu nível.",
   semente: "Oi {nome}! Seja muito bem-vinda à Comunidade Semente DRA. 18K 🌱 Aqui você vai dar os primeiros passos com todo o apoio que precisar. Qualquer dúvida, pode chamar!",
   bronze: "Oi {nome}! Parabéns por chegar ao nível Bronze 🥉 Isso mostra que você já deu os primeiros passos consistentes na DRA. 18K. Vamos juntas construir sua rotina de vendas!",
   prata: "Oi {nome}! Você acaba de entrar no grupo Prata 🥈 Seu resultado já mostra consistência. Agora o foco é recompra e relacionamento com suas clientes.",
@@ -221,6 +229,7 @@ let S = {
   bulkSentIds: [],
   autoBulk: null,    // { queue, index, mode, label, successIds, failedIds, running, stopped } — envio automático via CRM
   crmChannel: "juridico", // "juridico" | "anuncio" — qual token/número usar no envio
+  excelImport: null, // { rows, defaultTier, defaultDDI, importing } — pré-visualização da importação em massa
 };
 
 /* ======================= ICONS (inline SVG, feather-style) ======================= */
@@ -515,6 +524,140 @@ function cancelEdit(){
   document.getElementById("submitBtn").textContent = "Adicionar";
   document.getElementById("cancelEditBtn").style.display = "none";
 }
+/* ======================= IMPORTAÇÃO EM MASSA (Excel/CSV) ======================= */
+function normalizeKey(k){
+  return String(k||"").trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // remove acentos
+}
+function findColumn(row, candidates){
+  const keys = Object.keys(row);
+  for (const cand of candidates){
+    const found = keys.find(k => normalizeKey(k) === cand);
+    if (found) return found;
+  }
+  // fallback: contém a palavra (ex: "telefone celular")
+  for (const cand of candidates){
+    const found = keys.find(k => normalizeKey(k).includes(cand));
+    if (found) return found;
+  }
+  return null;
+}
+function normalizeImportedPhone(raw, defaultDDI){
+  const trimmed = String(raw||"").trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("+")) return onlyDigits(trimmed) ? "+"+onlyDigits(trimmed) : "";
+  const digits = onlyDigits(trimmed);
+  if (!digits) return "";
+  if (defaultDDI === "55" && (digits.length === 10 || digits.length === 11)) return digits;
+  if (digits.length > 11) return digits; // já parece incluir DDI
+  return "+"+defaultDDI+digits;
+}
+function matchTierFromLabel(raw){
+  const norm = normalizeKey(raw);
+  if (!norm) return null;
+  const found = TIERS.find(t => normalizeKey(t.key) === norm || normalizeKey(t.label) === norm);
+  return found ? found.key : null;
+}
+
+function onExcelFileSelected(inputEl){
+  const file = inputEl.files && inputEl.files[0];
+  inputEl.value = ""; // permite selecionar o mesmo arquivo de novo depois
+  if (!file) return;
+  if (typeof XLSX === "undefined"){ showToast("Não foi possível carregar o leitor de planilhas — verifique sua internet e recarregue a página"); return; }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try{
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      if (rawRows.length === 0){ showToast("Planilha vazia ou sem dados na primeira aba"); return; }
+
+      const nomeCol = findColumn(rawRows[0], ["nome", "name", "cliente", "revendedora"]);
+      const telCol = findColumn(rawRows[0], ["telefone", "celular", "whatsapp", "phone", "fone", "numero", "número"]);
+      const tierCol = findColumn(rawRows[0], ["nivel", "tier", "categoria"]);
+
+      const rows = rawRows.map(r => {
+        const nome = nomeCol ? String(r[nomeCol]||"").trim() : "";
+        const telefoneOriginal = telCol ? String(r[telCol]||"").trim() : "";
+        const tierDetectado = tierCol ? matchTierFromLabel(r[tierCol]) : null;
+        return { nome, telefoneOriginal, tierDetectado, include: true };
+      }).filter(r => r.nome || r.telefoneOriginal); // ignora linhas totalmente vazias
+
+      if (rows.length === 0){
+        showToast("Não encontrei colunas de nome/telefone reconhecíveis na planilha");
+        return;
+      }
+
+      S.excelImport = {
+        rows,
+        defaultTier: "sem_tier",
+        defaultDDI: "55",
+        nomeColFound: !!nomeCol,
+        telColFound: !!telCol,
+        tierColFound: !!tierCol,
+        importing: false,
+      };
+      renderModals();
+    }catch(err){
+      console.error(err);
+      showToast("Não consegui ler esse arquivo — confira se é .xlsx, .xls ou .csv válido");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function excelImportRowsPreview(){
+  const ei = S.excelImport;
+  if (!ei) return [];
+  return ei.rows.map(r => {
+    const telefone = normalizeImportedPhone(r.telefoneOriginal, ei.defaultDDI);
+    const tier = r.tierDetectado || ei.defaultTier;
+    const valid = !!(r.nome && telefone && onlyDigits(telefone).length >= 8);
+    return Object.assign({}, r, { telefone, tier, valid });
+  });
+}
+
+function setExcelDefaultTier(tier){ if (S.excelImport){ S.excelImport.defaultTier = tier; renderModals(); } }
+function setExcelDefaultDDI(ddi){ if (S.excelImport){ S.excelImport.defaultDDI = ddi; renderModals(); } }
+function toggleExcelRow(idx){
+  if (!S.excelImport) return;
+  S.excelImport.rows[idx].include = !S.excelImport.rows[idx].include;
+  renderModals();
+}
+function closeExcelImport(){ S.excelImport = null; renderModals(); }
+
+async function confirmExcelImport(){
+  const ei = S.excelImport;
+  if (!ei || ei.importing) return;
+  const preview = excelImportRowsPreview();
+  const toImport = preview.filter((r, idx) => r.valid && ei.rows[idx].include);
+
+  if (toImport.length === 0){ showToast("Nenhum contato válido selecionado"); return; }
+
+  ei.importing = true;
+  renderModals();
+
+  const rowsForInsert = toImport.map(r => ({ nome: r.nome, telefone: r.telefone, tier: r.tier }));
+  const { data, error } = await db.from("contacts").insert(rowsForInsert).select();
+
+  ei.importing = false;
+
+  if (error){
+    console.error(error);
+    showToast("Erro ao importar — verifique sua internet e tente de novo");
+    renderModals();
+    return;
+  }
+
+  if (data) S.contacts.push(...data);
+  renderChips(); renderList();
+  showToast(toImport.length+" contato(s) importado(s) com sucesso!");
+  closeExcelImport();
+}
+
+
 function deleteContact(id){
   if (S.editingId === id) cancelEdit();
   db.from("contacts").delete().eq("id", id)
@@ -850,6 +993,68 @@ function renderModals(){
         '<button class="btn btn-primary" style="margin-top:16px;display:inline-flex" onclick="closeBulk()">Fechar</button>'+
       '</div>';
     }
+    html += '</div></div>';
+  }
+
+  // Excel/CSV import modal
+  if (S.excelImport){
+    const ei = S.excelImport;
+    const preview = excelImportRowsPreview();
+    const validCount = preview.filter((r, idx) => r.valid && ei.rows[idx].include).length;
+    const invalidCount = preview.filter(r => !r.valid).length;
+
+    html += '<div class="modal-overlay"><div class="modal" style="max-width:560px">'+
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'+
+        '<div style="font-size:14px;font-weight:700">📊 Importar planilha</div>'+
+        '<button class="modal-close" onclick="closeExcelImport()">'+icon("x",18)+'</button>'+
+      '</div>'+
+      '<div style="font-size:11.5px;color:var(--dim2);margin-bottom:12px">'+ei.rows.length+' linha(s) encontrada(s) · '+
+        '<span style="color:#1F7A4D">'+validCount+' prontas pra importar</span>'+
+        (invalidCount ? ' · <span style="color:#B84E4E">'+invalidCount+' sem nome/telefone válido</span>' : '')+
+      '</div>';
+
+    if (!ei.telColFound){
+      html += '<div style="font-size:11.5px;color:#B84E4E;background:#FBEDED;border:1px solid #F0D3D3;border-radius:8px;padding:10px;margin-bottom:10px">Não encontrei uma coluna de telefone reconhecível (tentei: telefone, celular, whatsapp, número). Confira o cabeçalho da planilha.</div>';
+    }
+
+    html += '<div class="row-gap" style="margin-bottom:10px">'+
+      '<div style="flex:1">'+
+        '<label style="font-size:11px;color:var(--dim2);display:block;margin-bottom:3px">Nível padrão (linhas sem coluna de nível)</label>'+
+        '<select class="input" style="width:100%" onchange="setExcelDefaultTier(this.value)">'+
+          TIERS.map(t => '<option value="'+t.key+'"'+(ei.defaultTier===t.key?" selected":"")+'>'+t.emoji+' '+t.label+'</option>').join("")+
+        '</select>'+
+      '</div>'+
+      '<div style="flex:1">'+
+        '<label style="font-size:11px;color:var(--dim2);display:block;margin-bottom:3px">DDI padrão (números sem código de país)</label>'+
+        '<select class="input" style="width:100%" onchange="setExcelDefaultDDI(this.value)">'+
+          '<option value="55"'+(ei.defaultDDI==="55"?" selected":"")+'>🇧🇷 +55</option>'+
+          '<option value="595"'+(ei.defaultDDI==="595"?" selected":"")+'>🇵🇾 +595</option>'+
+          '<option value="54"'+(ei.defaultDDI==="54"?" selected":"")+'>🇦🇷 +54</option>'+
+          '<option value="598"'+(ei.defaultDDI==="598"?" selected":"")+'>🇺🇾 +598</option>'+
+          '<option value="1"'+(ei.defaultDDI==="1"?" selected":"")+'>🇺🇸/🇨🇦 +1</option>'+
+        '</select>'+
+      '</div>'+
+    '</div>'+
+    '<div style="max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;margin-bottom:12px">';
+
+    preview.forEach((r, idx) => {
+      const t = tierOf(r.tier);
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);opacity:'+(r.valid && ei.rows[idx].include ? "1":"0.45")+'">'+
+        '<input type="checkbox" '+(ei.rows[idx].include?"checked":"")+' '+(r.valid?"":"disabled")+' onchange="toggleExcelRow('+idx+')">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(r.nome||"(sem nome)")+'</div>'+
+          '<div style="font-size:11px;color:var(--dim2)">'+esc(r.telefone||"telefone inválido: "+esc(r.telefoneOriginal))+'</div>'+
+        '</div>'+
+        '<span class="tier-badge" style="background:'+t.light+';color:'+t.color+';white-space:nowrap">'+t.emoji+' '+t.label+'</span>'+
+      '</div>';
+    });
+
+    html += '</div>'+
+    '<div class="row-gap">'+
+      '<button class="btn btn-light" style="flex:1" onclick="closeExcelImport()">Cancelar</button>'+
+      '<button class="btn btn-primary" style="flex:2" '+(ei.importing?"disabled":"")+' onclick="confirmExcelImport()">'+(ei.importing?"Importando...":"Importar "+validCount+" contato(s)")+'</button>'+
+    '</div>';
+
     html += '</div></div>';
   }
 
